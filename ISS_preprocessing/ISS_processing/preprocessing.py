@@ -6,7 +6,6 @@ import tifffile
 import numpy as np
 import re
 import shutil
-from os.path import join
 import ISS_processing.preprocessing as preprocessing
 import ashlar.scripts.ashlar as ashlar
 import cv2
@@ -15,6 +14,10 @@ import mat73
 import pathlib
 import xml.etree.ElementTree as ET
 from aicspylibczi import CziFile
+from os import listdir
+from os.path import isfile, join
+from xml.dom import minidom
+from tifffile import imread
 
 
 
@@ -107,9 +110,10 @@ def zen_OME_tiff(exported_directory, output_directory, channel_split=2, cycle_sp
                 tif.write(stacked_images.astype('uint16'), metadata=metadata)
 
 
-def leica_mipping(input_dirs, output_dir_prefix, image_dimension=[2048, 2048]):
-    """
-    Process and MIP (maximum intensity projection) microscopy image files exported from Leica as TIFFs.
+
+
+def leica_mipping(input_dirs, output_dir_prefix, image_dimension=[2048, 2048],mode=None):
+    """Process and MIP (maximum intensity projection) microscopy image files exported from Leica as TIFFs.
 
     Parameters:
     - input_dirs: List of file paths to the input directories.
@@ -117,51 +121,48 @@ def leica_mipping(input_dirs, output_dir_prefix, image_dimension=[2048, 2048]):
     - image_dimension: Dimensions of the image (default is [2048, 2048]).
     """
 
-    # Import necessary libraries
-    from os import listdir
-    from os.path import isfile, join
-    import tifffile
-    from xml.dom import minidom
-    import pandas as pd
-    import numpy as np
-    import os
-    from tifffile import imread
-    from tqdm import tqdm
-    import re
-    import shutil
-
     # Refactor input directories for compatibility (especially with Linux)
     refactored_dirs = [dir_path.replace("%20", " ") for dir_path in input_dirs]
 
     # Iterate through each input directory
     for idx, dir_path in enumerate(refactored_dirs):
-
         # Get list of files in the directory
         files = os.listdir(dir_path)
-        
         # Filter for TIFF files that are not deconvolved
         tif_files = [file for file in files if 'dw' not in file and '.tif' in file and '.txt' not in file]
-        
+        if mode=='exported':
+            split_underscore = pd.DataFrame(tif_files)[0].str.split('_', expand=True)
+            
+            unique_regions = list(split_underscore[0].unique())
+            #unique_regions=pd.Series(unique_regions).str.split(' ', expand=True)[2]
+        else:
         # Split filenames to get the regions
-        split_underscore = pd.DataFrame(tif_files)[0].str.split('--', expand=True)
-        unique_regions = list(split_underscore[0].unique())
-
-        # If the scan is large, it may be divided into multiple regions
+            split_underscore = pd.DataFrame(tif_files)[0].str.split('--', expand=True)
+            unique_regions = list(split_underscore[0].unique())
+            # If the scan is large, it may be divided into multiple regions
         for region in unique_regions:
+            print(region)
             region_tif_files = [file for file in tif_files if region in file]
             base_index = str(idx + 1)
-            split_underscore = pd.DataFrame(region_tif_files)[0].str.split('--', expand=True)
-            
-            # Extract tiles information
-            tiles = sorted(split_underscore[1].unique())
-            tiles_df = pd.DataFrame(tiles)
-            tiles_df['indexNumber'] = [int(tile.split('e')[-1]) for tile in tiles_df[0]]
-            tiles_df.sort_values(by=['indexNumber'], ascending=True, inplace=True)
-            tiles_df.drop('indexNumber', 1, inplace=True)
-            tiles = list(tiles_df[0])
-            
-            # Extract channels information
-            channels = split_underscore[3].unique()
+            if mode=='exported':
+                #region_tif_files=tif_files
+                split_underscore = pd.Series(region_tif_files).str.split('_', expand=True)
+                tiles = sorted(split_underscore.iloc[:, -3].unique())
+                tiles_df = pd.DataFrame(tiles)
+                tiles_df['indexNumber'] = [int(tile.split('s')[-1]) for tile in tiles_df[0]]
+                tiles_df.sort_values(by=['indexNumber'], ascending=True, inplace=True)
+                tiles_df.drop(labels='indexNumber', axis=1, inplace=True)
+                tiles = list(tiles_df[0])
+                channels = split_underscore.iloc[:, -1].unique()
+            else:
+                split_underscore = pd.DataFrame(region_tif_files)[0].str.split('-', expand=True)
+                tiles = sorted(split_underscore[1].unique())
+                tiles_df = pd.DataFrame(tiles)
+                tiles_df['indexNumber'] = [int(tile.split('e')[-1]) for tile in tiles_df[0]]
+                tiles_df.sort_values(by=['indexNumber'], ascending=True, inplace=True)
+                tiles_df.drop('indexNumber', 1, inplace=True)
+                tiles = list(tiles_df[0])
+                channels = split_underscore[3].unique()
             
             # Determine the output directory based on the region
             if len(unique_regions) == 1:
@@ -178,7 +179,11 @@ def leica_mipping(input_dirs, output_dir_prefix, image_dimension=[2048, 2048]):
                 if not os.path.exists(f"{mipped_output_dir}/Base_{base}"):
                     os.makedirs(f"{mipped_output_dir}/Base_{base}")
                 try:
-                    metadata_file = join(dir_path, 'Metadata', [file for file in os.listdir(join(dir_path, 'Metadata')) if region in file][0])
+                    if mode=='exported':
+                        metadata_file = join(dir_path, 'MetaData', [file for file in os.listdir(join(dir_path, 'MetaData')) if region in file][0])
+                    else:
+                        metadata_file = join(dir_path, 'Metadata', [file for file in os.listdir(join(dir_path, 'Metadata')) if region in file][0])
+                    
                     if not os.path.exists(join(mipped_output_dir, f"Base_{base}", 'MetaData')):
                         os.makedirs(join(mipped_output_dir, f"Base_{base}", 'MetaData'))
                     shutil.copy(metadata_file, join(mipped_output_dir, f"Base_{base}", 'MetaData'))
@@ -206,8 +211,6 @@ def leica_mipping(input_dirs, output_dir_prefix, image_dimension=[2048, 2048]):
                                 max_intensity = np.maximum(max_intensity, im_array)
                             max_intensity = max_intensity.astype('uint16')
                             tifffile.imwrite(f"{mipped_output_dir}/Base_{base}/Base_{base}_s{tile_for_name}_{channel}", max_intensity)
-
-
 
 
 
@@ -527,7 +530,8 @@ def preprocessing_main_leica(input_dirs,
                             regions_to_process = 2, 
                             align_channel = 4, 
                             tile_dimension = 6000, 
-                            mip = True):
+                            mip = True,
+                            mode=None):
     """
     Main function to preprocess Leica microscopy images.
 
@@ -538,11 +542,12 @@ def preprocessing_main_leica(input_dirs,
     - align_channel (int): Channel to use for alignment. Default is 4.
     - tile_dimension (int): Dimension for tiling. Default is 6000.
     - mip (bool): Flag to perform maximum intensity projection. Default is True. Use false for pre-mipped images
+    - mode (str): Flag to define whether the images were saved via Autosave (mode=None) or through the export function (mode='exported')
     """
     
     # Maximum Intensity Projection
     if mip == True:
-        leica_mipping(input_dirs=input_dirs, output_dir_prefix = output_location)
+        leica_mipping(input_dirs=input_dirs, output_dir_prefix = output_location,mode=mode)
     else: 
         print('not mipping')
         
