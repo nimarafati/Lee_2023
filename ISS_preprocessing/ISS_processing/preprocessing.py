@@ -112,8 +112,10 @@ def zen_OME_tiff(exported_directory, output_directory, channel_split=2, cycle_sp
 
 
 
-def leica_mipping(input_dirs, output_dir_prefix, image_dimension=[2048, 2048],mode=None):
-    """Process and MIP (maximum intensity projection) microscopy image files exported from Leica as TIFFs.
+
+def leica_mipping(input_dirs, output_dir_prefix, image_dimension=[2048, 2048], mode=None):
+    """
+    Process and MIP (maximum intensity projection) microscopy image files exported from Leica as TIFFs.
 
     Parameters:
     - input_dirs: List of file paths to the input directories.
@@ -121,31 +123,114 @@ def leica_mipping(input_dirs, output_dir_prefix, image_dimension=[2048, 2048],mo
     - image_dimension: Dimensions of the image (default is [2048, 2048]).
     """
 
-    # Refactor input directories for compatibility (especially with Linux)
-    refactored_dirs = [dir_path.replace("%20", " ") for dir_path in input_dirs]
+    # Import necessary libraries
+    from os import listdir
+    from os.path import isfile, join
+    import tifffile
+    from xml.dom import minidom
+    import pandas as pd
+    import numpy as np
+    import os
+    from tifffile import imread
+    from tqdm import tqdm
+    import re
+    import shutil
 
-    # Iterate through each input directory
-    for idx, dir_path in enumerate(refactored_dirs):
-        # Get list of files in the directory
-        files = os.listdir(dir_path)
-        # Filter for TIFF files that are not deconvolved
-        tif_files = [file for file in files if 'dw' not in file and '.tif' in file and '.txt' not in file]
-        if mode=='exported':
-            split_underscore = pd.DataFrame(tif_files)[0].str.split('_', expand=True)
+    if mode==None:
+        # Refactor input directories for compatibility (especially with Linux)
+        refactored_dirs = [dir_path.replace("%20", " ") for dir_path in input_dirs]
+    
+        # Iterate through each input directory
+        for idx, dir_path in enumerate(refactored_dirs):
+    
+            # Get list of files in the directory
+            files = os.listdir(dir_path)
             
-            unique_regions = list(split_underscore[0].unique())
-            #unique_regions=pd.Series(unique_regions).str.split(' ', expand=True)[2]
-        else:
-        # Split filenames to get the regions
+            # Filter for TIFF files that are not deconvolved
+            tif_files = [file for file in files if 'dw' not in file and '.tif' in file and '.txt' not in file]
+            
+            # Split filenames to get the regions
             split_underscore = pd.DataFrame(tif_files)[0].str.split('--', expand=True)
             unique_regions = list(split_underscore[0].unique())
+    
             # If the scan is large, it may be divided into multiple regions
-        for region in unique_regions:
-            print(region)
-            region_tif_files = [file for file in tif_files if region in file]
-            base_index = str(idx + 1)
-            if mode=='exported':
-                #region_tif_files=tif_files
+            for region in unique_regions:
+                region_tif_files = [file for file in tif_files if region in file]
+                base_index = str(idx + 1)
+                split_underscore = pd.DataFrame(region_tif_files)[0].str.split('--', expand=True)
+                
+                # Extract tiles information
+                tiles = sorted(split_underscore[1].unique())
+                tiles_df = pd.DataFrame(tiles)
+                tiles_df['indexNumber'] = [int(tile.split('e')[-1]) for tile in tiles_df[0]]
+                tiles_df.sort_values(by=['indexNumber'], ascending=True, inplace=True)
+                tiles_df.drop('indexNumber', 1, inplace=True)
+                tiles = list(tiles_df[0])
+                
+                # Extract channels information
+                channels = split_underscore[3].unique()
+                
+                # Determine the output directory based on the region
+                if len(unique_regions) == 1:
+                    output_dir = output_dir_prefix
+                else:
+                    output_dir = f"{output_dir_prefix}_R{region.split('Region')[1].split('_')[0]}"
+                mipped_output_dir = f"{output_dir}/preprocessing/mipped/"
+                
+                # Create directory if it doesn't exist
+                if not os.path.exists(mipped_output_dir):
+                    os.makedirs(mipped_output_dir)
+    
+                for base_idx, base in enumerate(sorted(base_index)):
+                    if not os.path.exists(f"{mipped_output_dir}/Base_{base}"):
+                        os.makedirs(f"{mipped_output_dir}/Base_{base}")
+                    try:
+                        metadata_file = join(dir_path, 'Metadata', [file for file in os.listdir(join(dir_path, 'Metadata')) if region in file][0])
+                        if not os.path.exists(join(mipped_output_dir, f"Base_{base}", 'MetaData')):
+                            os.makedirs(join(mipped_output_dir, f"Base_{base}", 'MetaData'))
+                        shutil.copy(metadata_file, join(mipped_output_dir, f"Base_{base}", 'MetaData'))
+                    except FileExistsError:
+                        pass
+    
+                    # Maximum Intensity Projection (MIP) for each tile
+                    for _tile in tqdm(range(len(tiles))):
+                        tile = tiles[_tile]
+                        tile_for_name = re.split('(\d+)', tile)[1]
+                        existing_files = [file for file in os.listdir(f"{mipped_output_dir}/Base_{base}") if str(tile_for_name) in file]
+                        
+                        # Ensure that we don't overwrite existing files
+                        if len(existing_files) < len(channels):
+                            tile_tif_files = [file for file in region_tif_files if f"{tile}--" in file]
+                            for channel_idx, channel in enumerate(sorted(list(channels))):
+                                channel_tif_files = [file for file in tile_tif_files if str(channel) in file]
+                                max_intensity = np.zeros(image_dimension)
+                                for file in channel_tif_files:
+                                    try:
+                                        im_array = imread(f"{dir_path}/{file}")
+                                    except:
+                                        print('Image corrupted, reading black file instead.')
+                                        im_array = np.zeros(image_dimension)
+                                    max_intensity = np.maximum(max_intensity, im_array)
+                                max_intensity = max_intensity.astype('uint16')
+                                tifffile.imwrite(f"{mipped_output_dir}/Base_{base}/Base_{base}_s{tile_for_name}_{channel}", max_intensity)
+    if mode=='exported':
+        print ('Processing Leica files from export mode')
+        # Refactor input directories for compatibility (especially with Linux)
+        refactored_dirs = [dir_path.replace("%20", " ") for dir_path in input_dirs]
+        #print (refactored_dirs)
+    
+        # Iterate through each input directory
+        for idx, dir_path in enumerate(refactored_dirs):
+            # Get list of files in the directory
+            files = os.listdir(dir_path)
+            # Filter for TIFF files that are not deconvolved
+            tif_files = [file for file in files if 'dw' not in file and '.tif' in file and '.txt' not in file]
+            split_underscore = pd.DataFrame(tif_files)[0].str.split('_', expand=True)
+            unique_regions = list(split_underscore[0].unique())
+            for region in unique_regions:
+                print(region)
+                region_tif_files = [file for file in tif_files if region in file]
+                base_index = str(idx + 1)
                 split_underscore = pd.Series(region_tif_files).str.split('_', expand=True)
                 tiles = sorted(split_underscore.iloc[:, -3].unique())
                 tiles_df = pd.DataFrame(tiles)
@@ -154,65 +239,53 @@ def leica_mipping(input_dirs, output_dir_prefix, image_dimension=[2048, 2048],mo
                 tiles_df.drop(labels='indexNumber', axis=1, inplace=True)
                 tiles = list(tiles_df[0])
                 channels = split_underscore.iloc[:, -1].unique()
-            else:
-                split_underscore = pd.DataFrame(region_tif_files)[0].str.split('-', expand=True)
-                tiles = sorted(split_underscore[1].unique())
-                tiles_df = pd.DataFrame(tiles)
-                tiles_df['indexNumber'] = [int(tile.split('e')[-1]) for tile in tiles_df[0]]
-                tiles_df.sort_values(by=['indexNumber'], ascending=True, inplace=True)
-                tiles_df.drop('indexNumber', 1, inplace=True)
-                tiles = list(tiles_df[0])
-                channels = split_underscore[3].unique()
-            
-            # Determine the output directory based on the region
-            if len(unique_regions) == 1:
-                output_dir = output_dir_prefix
-            else:
-                output_dir = f"{output_dir_prefix}_R{region.split('Region')[1].split('_')[0]}"
-            mipped_output_dir = f"{output_dir}/preprocessing/mipped/"
-            
-            # Create directory if it doesn't exist
-            if not os.path.exists(mipped_output_dir):
-                os.makedirs(mipped_output_dir)
-
-            for base_idx, base in enumerate(sorted(base_index)):
-                if not os.path.exists(f"{mipped_output_dir}/Base_{base}"):
-                    os.makedirs(f"{mipped_output_dir}/Base_{base}")
-                try:
-                    if mode=='exported':
+                # Determine the output directory based on the region
+                if len(unique_regions) == 1:
+                    output_dir = output_dir_prefix
+                else:
+                    output_dir = f"{output_dir_prefix}_R{region.split('Region')[1].split('_')[0]}"
+                mipped_output_dir = f"{output_dir}/preprocessing/mipped/"
+                
+                # Create directory if it doesn't exist
+                if not os.path.exists(mipped_output_dir):
+                    os.makedirs(mipped_output_dir)
+    
+                for base_idx, base in enumerate(sorted(base_index)):
+                    if not os.path.exists(f"{mipped_output_dir}/Base_{base}"):
+                        os.makedirs(f"{mipped_output_dir}/Base_{base}")
+                    try:
                         metadata_file = join(dir_path, 'MetaData', [file for file in os.listdir(join(dir_path, 'MetaData')) if region in file][0])
-                    else:
-                        metadata_file = join(dir_path, 'Metadata', [file for file in os.listdir(join(dir_path, 'Metadata')) if region in file][0])
+                       
+                        if not os.path.exists(join(mipped_output_dir, f"Base_{base}", 'MetaData')):
+                            os.makedirs(join(mipped_output_dir, f"Base_{base}", 'MetaData'))
+                        shutil.copy(metadata_file, join(mipped_output_dir, f"Base_{base}", 'MetaData'))
+                    except FileExistsError:
+                        pass
+    
+                    # Maximum Intensity Projection (MIP) for each tile
+                    for _tile in tqdm(range(len(tiles))):
+                        tile = tiles[_tile]
+                        tile_for_name = re.split('(\d+)', tile)[1]
+                        existing_files = [file for file in os.listdir(f"{mipped_output_dir}/Base_{base}") if str(tile_for_name) in file]
+                        
+                        # Ensure that we don't overwrite existing files
+                        if len(existing_files) < len(channels):
+                            tile_tif_files = [file for file in region_tif_files if f"{tile}--" in file]
+                            for channel_idx, channel in enumerate(sorted(list(channels))):
+                                channel_tif_files = [file for file in tile_tif_files if str(channel) in file]
+                                max_intensity = np.zeros(image_dimension)
+                                for file in channel_tif_files:
+                                    try:
+                                        im_array = imread(f"{dir_path}/{file}")
+                                    except:
+                                        print('Image corrupted, reading black file instead.')
+                                        im_array = np.zeros(image_dimension)
+                                    max_intensity = np.maximum(max_intensity, im_array)
+                                max_intensity = max_intensity.astype('uint16')
+                                tifffile.imwrite(f"{mipped_output_dir}/Base_{base}/Base_{base}_s{tile_for_name}_{channel}", max_intensity)
+    
+    
                     
-                    if not os.path.exists(join(mipped_output_dir, f"Base_{base}", 'MetaData')):
-                        os.makedirs(join(mipped_output_dir, f"Base_{base}", 'MetaData'))
-                    shutil.copy(metadata_file, join(mipped_output_dir, f"Base_{base}", 'MetaData'))
-                except FileExistsError:
-                    pass
-
-                # Maximum Intensity Projection (MIP) for each tile
-                for _tile in tqdm(range(len(tiles))):
-                    tile = tiles[_tile]
-                    tile_for_name = re.split('(\d+)', tile)[1]
-                    existing_files = [file for file in os.listdir(f"{mipped_output_dir}/Base_{base}") if str(tile_for_name) in file]
-                    
-                    # Ensure that we don't overwrite existing files
-                    if len(existing_files) < len(channels):
-                        tile_tif_files = [file for file in region_tif_files if f"{tile}--" in file]
-                        for channel_idx, channel in enumerate(sorted(list(channels))):
-                            channel_tif_files = [file for file in tile_tif_files if str(channel) in file]
-                            max_intensity = np.zeros(image_dimension)
-                            for file in channel_tif_files:
-                                try:
-                                    im_array = imread(f"{dir_path}/{file}")
-                                except:
-                                    print('Image corrupted, reading black file instead.')
-                                    im_array = np.zeros(image_dimension)
-                                max_intensity = np.maximum(max_intensity, im_array)
-                            max_intensity = max_intensity.astype('uint16')
-                            tifffile.imwrite(f"{mipped_output_dir}/Base_{base}/Base_{base}_s{tile_for_name}_{channel}", max_intensity)
-
-
 
 
 
